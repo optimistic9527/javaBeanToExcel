@@ -16,6 +16,7 @@ import java.lang.reflect.Field;
 import java.sql.Timestamp;
 import java.text.SimpleDateFormat;
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * @author guoxy
@@ -32,14 +33,17 @@ public class ExcelHelp<T> {
 
 	private static final String DEFAULT_TIME_FORMAT = "yyyy-MM-dd HH:mm:ss";
 
+	//用于存贮被注解修饰的bean的属性数据
 	private HashMap<String, Field> fieldMap = new HashMap<>();
+
 	// 标题（列头）样式
 	private WritableCellFormat titleFormat;
 	//列头样式
 	private WritableCellFormat headFormat;
-	// 正文样式1：居中
+	// 正文样式
 	private WritableCellFormat bodyCellFormat;
-
+	//统计样式
+	private WritableCellFormat sumCellFormat;
 
 	private WritableWorkbook workbook;
 
@@ -47,29 +51,33 @@ public class ExcelHelp<T> {
 		titleFormat = ShareFunction.setTitleCellFormat();
 		headFormat = ShareFunction.setHeaderCellFormat();
 		bodyCellFormat = ShareFunction.setBodyCellFormat();
+		sumCellFormat = ShareFunction.setBodyRedCellFormat();
 		timeFormat = DEFAULT_TIME_FORMAT;
 		fontSize = 10;
 	}
 
-	private void export(ExportExcelBean<T> exportExcelBean, OutputStream os) {
+	private void export(ExportExcelBean<T> exportExcelBean, OutputStream os, Integer... cloNow) {
 		try {
 			workbook = Workbook.createWorkbook(os);
-			addSheet(exportExcelBean.getKeyMap(), exportExcelBean.getContentList(), exportExcelBean.getSheetName());
+			addSheet(exportExcelBean.getKeyMap(), exportExcelBean.getContentList(), exportExcelBean.getSheetName(), cloNow);
 			workbook.write();
 			workbook.close();
+			//关闭流
+			os.flush();
+			os.close();
 		} catch (Exception e) {
-
 			e.printStackTrace();
 		}
 	}
 
-	private void addSheet(LinkedHashMap<String, String> keyMap, List<T> listContent, String sheetName)
-			throws WriteException, IllegalAccessException {
+	private void addSheet(LinkedHashMap<String, String> keyMap, List<T> listContent, String sheetName, Integer... cloNum)
+			throws Exception{
 		// 创建名为sheetName的工作表
 		WritableSheet sheet = workbook.createSheet(sheetName, 0);
 		// 设置标题,标题内容为keyMap中的value值
 		//合并4个参数分别为开始列，开始行，合并到那一列，合并到哪一行
-		sheet.mergeCells(0, 0, keyMap.size(), 0);
+		int maxCloSize = keyMap.size();
+		sheet.mergeCells(0, 0, maxCloSize-1, 0);
 		sheet.addCell(new Label(0, 0, title, titleFormat));
 
 		//冻结表头
@@ -83,9 +91,13 @@ public class ExcelHelp<T> {
 			Map.Entry<String, String> entry = headIterator.next();
 			sheet.addCell(new Label(titleIndex++, 1, entry.getValue(), headFormat));
 		}
-
+		Map<Integer, Double> cloCountMap = null;
+		//过滤掉超过列数的数字，并映射成初始map
+		if (cloNum != null) {
+			cloCountMap = Arrays.stream(cloNum).filter(i->i<maxCloSize).collect(Collectors.toMap(i -> i, i -> 0.0));
+		}
 		// 设置正文内容
-		for (int row = 0; row < listContent.size(); row++) {
+		for (int row = 0, size = listContent.size(); row < size; row++) {
 			Iterator<Map.Entry<String, String>> headContent = keyMap.entrySet().iterator();
 			int col = 0;
 			while (headContent.hasNext()) {
@@ -93,30 +105,62 @@ public class ExcelHelp<T> {
 				String key = entry.getKey();
 				Field field = fieldMap.get(key);
 				Object content = field.get(listContent.get(row));
+				if (cloCountMap != null && cloCountMap.containsKey(col)) {
+					try {
+						cloCountMap.put(col, cloCountMap.get(col) + Double.parseDouble(String.valueOf(content)));
+					} catch (Exception e) {
+						//发生异常代表想要统计的列并不能转换成数字，
+						cloCountMap.remove(col);
+					}
+				}
 				Label label = getContentLabel(col, row + 2, field, content);
 				col++;
 				sheet.addCell(label);
 			}
 		}
-		setAutoSize(sheet, keyMap.size(), listContent.size());
+		//统计map可用事，生成统计列
+		if (cloCountMap != null&&!cloCountMap.isEmpty()) {
+			sheet.addCell(new Label(0, listContent.size() + 2, "总计", sumCellFormat));
+			for (Map.Entry<Integer, Double> integerIntegerEntry : cloCountMap.entrySet()) {
+				sheet.addCell(new Label(integerIntegerEntry.getKey(), listContent.size() + 2, String.valueOf(integerIntegerEntry.getValue()), sumCellFormat));
+			}
+		}
+		setAutoSize(sheet, maxCloSize, listContent.size());
 	}
 
 	public static ExcelHelp getExcelHelp() {
 		return new ExcelHelp();
 	}
 
-	public final void exportByAnnotation(OutputStream os, List<T> dataSource) {
+	/**
+	 *
+	 * @param os 可以是响应流，可以是io流
+	 * @param dataSource 需要生成excel的bean的列表
+	 * @param title excel的标题是什么
+	 * @param cloNow 需要去统计那写列的数据（列是从0开始的）
+	 * @throws IOException
+	 */
+	public final void exportByAnnotation(OutputStream os, List<T> dataSource,String title,Integer... cloNow) {
+		this.title = title;
 		ExportExcelBean<T> sheetBeanByAnnotation = getSheetBeanByAnnotation(dataSource);
-		export(sheetBeanByAnnotation, os);
+		export(sheetBeanByAnnotation, os, cloNow);
 	}
 
-	public final void httpExport(HttpServletResponse response, List<T> dataSource, String title) throws IOException {
-		this.title = title;
+	/**
+	 *
+	 * @param response http响应
+	 * @param dataSource 需要生成excel的bean的列表
+	 * @param title excel的标题是什么
+	 * @param cloNow 需要去统计那写列的数据（列是从0开始的）
+	 * @throws IOException
+	 */
+	public final void httpExport(HttpServletResponse response, List<T> dataSource, String title, Integer... cloNow) throws IOException {
 		response.setContentType("application/vnd.ms-excel");
 		response.setHeader("Content-Disposition", "attachment;filename=document.xls");
-		exportByAnnotation(response.getOutputStream(), dataSource);
+		exportByAnnotation(response.getOutputStream(), dataSource, title,cloNow);
 	}
 
+	//获取bean里面的注解数据
 	private ExportExcelBean<T> getSheetBeanByAnnotation(List<T> sheet) {
 		T row = sheet.get(0);
 		Class<?> clazz = row.getClass();
@@ -228,5 +272,29 @@ public class ExcelHelp<T> {
 
 	public void setTitle(String title) {
 		this.title = title;
+	}
+
+	public WritableCellFormat getTitleFormat() {
+		return titleFormat;
+	}
+
+	public void setTitleFormat(WritableCellFormat titleFormat) {
+		this.titleFormat = titleFormat;
+	}
+
+	public WritableCellFormat getBodyCellFormat() {
+		return bodyCellFormat;
+	}
+
+	public void setBodyCellFormat(WritableCellFormat bodyCellFormat) {
+		this.bodyCellFormat = bodyCellFormat;
+	}
+
+	public WritableCellFormat getSumCellFormat() {
+		return sumCellFormat;
+	}
+
+	public void setSumCellFormat(WritableCellFormat sumCellFormat) {
+		this.sumCellFormat = sumCellFormat;
 	}
 }
